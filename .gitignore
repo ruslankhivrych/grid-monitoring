@@ -1,27 +1,4 @@
-# Xcode / Swift
-build/
-DerivedData/
-*.xcodeproj/
-*.xcworkspace/
-!default.xcworkspace
-xcuserdata/
-*.xcuserstate
-*.moved-aside
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-
-# Swift Package Manager
-.build/
-.swiftpm/
-Package.resolved
-
-# macOS
+# Системні файли
 .DS_Store
 
 # Тимчасові/секрети
@@ -35,6 +12,10 @@ docs/samples/
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
 bot/.env

@@ -2,6 +2,8 @@ services:
   bot:
     build: .
     env_file: .env
+    environment:
+      DB_PATH: /data/bot.db
     restart: unless-stopped
     volumes:
       - bot-data:/data

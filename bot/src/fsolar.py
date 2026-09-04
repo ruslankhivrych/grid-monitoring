@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.serialization import load_der_public_key
 
 BASE_URL = "https://shine-api.felicitysolar.com"
 
-# Публічний RSA-ключ FSolar (SPKI, base64) — той самий, що в iOS RSACrypto.swift.
+# Публічний RSA-ключ FSolar (SPKI, base64), отриманий з веб-клієнта FSolar.
 PUBLIC_KEY_SPKI = (
     "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnAJE68pjWZmtSg6ZJs9FZugJXC6bBSluTW6mJtt"
     "OLOaljrdErVnM5DNN+YFzpB9pAysTErjY1bnSVuEwQSwptnqUji7Ch2qMj2n+0eCp8p6vtSh7/tFr2ul8nD"
@@ -50,6 +50,11 @@ class Snapshot:
     batt_power: float | None = None      # emsPower, Вт
     load_percent: int | None = None      # loadPercent, %
     capacity: int | None = None          # totalEmsCapacity
+    load_power: float | None = None      # totalConsumPower, Вт
+    load_energy_today: float | None = None   # eLoadToday, кВт·год
+    load_energy_month: float | None = None   # eLoadMonth, кВт·год
+    load_energy_year: float | None = None    # eLoadYear, кВт·год
+    load_energy_total: float | None = None   # eLoadTotal, кВт·год
 
 
 def _to_float(value) -> float | None:
@@ -61,6 +66,11 @@ def _to_float(value) -> float | None:
         return None
 
 
+def _first_present(*values):
+    """Повертає перше значення, яке не є None або порожнім рядком."""
+    return next((value for value in values if value is not None and value != ""), None)
+
+
 def parse_snapshot(data: dict) -> Snapshot:
     """Мапінг відповіді get_device_snapshot у стан мережі/батареї (тестоване)."""
     voltage = _to_float(data.get("acRInVolt"))
@@ -70,7 +80,7 @@ def parse_snapshot(data: dict) -> Snapshot:
     # Стан мережі: напруга на вході > порога АБО режим "Line".
     is_present = (voltage or 0) > MAINS_VOLTAGE_THRESHOLD or "line" in work_mode.lower()
 
-    soc_raw = data.get("emsSoc") or data.get("emsSocAvg") or data.get("battSoc")
+    soc_raw = _first_present(data.get("emsSoc"), data.get("emsSocAvg"), data.get("battSoc"))
     soc_f = _to_float(soc_raw)
     soc = int(soc_f) if soc_f is not None else None
 
@@ -84,6 +94,11 @@ def parse_snapshot(data: dict) -> Snapshot:
 
     load_f = _to_float(data.get("loadPercent"))
     cap_f = _to_float(data.get("totalEmsCapacity"))
+    batt_voltage = _to_float(data.get("emsVoltage"))
+    batt_current = _to_float(data.get("emsCurrent"))
+    batt_power = _to_float(_first_present(data.get("emsPowerTotal"), data.get("emsPower")))
+    if batt_power is None and batt_voltage is not None and batt_current is not None:
+        batt_power = batt_voltage * batt_current
 
     return Snapshot(
         is_present=is_present,
@@ -91,12 +106,32 @@ def parse_snapshot(data: dict) -> Snapshot:
         frequency=frequency,
         work_mode=work_mode,
         soc=soc,
-        batt_voltage=_to_float(data.get("emsVoltage")),
-        batt_current=_to_float(data.get("emsCurrent")),
+        batt_voltage=batt_voltage,
+        batt_current=batt_current,
         timestamp=timestamp,
-        batt_power=_to_float(data.get("emsPower")),
+        batt_power=batt_power,
         load_percent=int(load_f) if load_f is not None else None,
         capacity=int(cap_f) if cap_f is not None else None,
+        load_power=_to_float(
+            _first_present(
+                data.get("totalConsumPower"),
+                data.get("loadPower"),
+                data.get("loadPowerConvertion"),
+                data.get("acTotalOutActPower"),
+            )
+        ),
+        load_energy_today=_to_float(
+            _first_present(data.get("eLoadToday"), data.get("tLoadToday"))
+        ),
+        load_energy_month=_to_float(
+            _first_present(data.get("eLoadMonth"), data.get("tLoadMonth"))
+        ),
+        load_energy_year=_to_float(
+            _first_present(data.get("eLoadYear"), data.get("tLoadYear"))
+        ),
+        load_energy_total=_to_float(
+            _first_present(data.get("eLoadTotal"), data.get("tLoadTotal"))
+        ),
     )
 
 

@@ -17,8 +17,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install -r bot/requirements.txt pytest
+        run: pip install -r bot/requirements.txt pytest pip-audit
+      - name: Verify dependency graph
+        run: pip check
+      - name: Audit dependencies
+        run: pip-audit -r bot/requirements.txt
       - name: Syntax check
         run: python -m compileall bot/src
       - name: Run tests
         run: pytest bot/tests -q
+      - name: Build Docker image
+        run: docker build -t felicity-grid-bot:test bot

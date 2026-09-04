@@ -1,21 +1,21 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-    Перевірка живого FSolar API з Windows — дзеркалить логіку iOS-застосунку.
+    Перевірка живого FSolar API, який використовує Telegram-бот.
 .DESCRIPTION
-    Робить те саме, що GridMonitor: RSA-шифрує пароль публічним ключем FSolar,
+    RSA-шифрує пароль публічним ключем FSolar,
     логіниться (/userlogin), тягне знімок (get_device_snapshot) і журнал тривог
-    (device_warring_list), і друкує поля, які застосунок мапить у стан мережі/батареї.
+    (device_warring_list), і друкує поля, які бот мапить у стан мережі/батареї.
     Запустіть під час реального відключення, щоб підтвердити grid-OFF значення.
 .EXAMPLE
-    pwsh ./scripts/verify-api.ps1 -UserName you@example.com
+    pwsh ./scripts/verify-api.ps1 -UserName you@example.com -DeviceSn YOUR_SERIAL
 .NOTES
     Потрібен PowerShell 7+ (.NET Core: ImportSubjectPublicKeyInfo + RSA PKCS#1).
     Пароль вводиться безпечно (не в аргументах); токен не друкується.
 #>
 param(
     [Parameter(Mandatory)] [string] $UserName,
-    [string] $DeviceSn = "020912004825490362",
+    [Parameter(Mandatory)] [string] $DeviceSn,
     [string] $DeviceType = "OG",
     [int]    $Days = 7
 )
@@ -23,7 +23,7 @@ param(
 $ErrorActionPreference = "Stop"
 $BaseUrl = "https://shine-api.felicitysolar.com"
 
-# Публічний RSA-ключ FSolar (SPKI, base64) — той самий, що в RSACrypto.swift.
+# Публічний RSA-ключ FSolar (SPKI, base64), отриманий з веб-клієнта FSolar.
 $PublicKeySpki = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnAJE68pjWZmtSg6ZJs9FZugJXC6bBSluTW6mJttOLOaljrdErVnM5DNN+YFzpB9pAysTErjY1bnSVuEwQSwptnqUji7Ch2qMj2n+0eCp8p6vtSh7/tFr2ul8nDRtkoswLANAIwtUk/G85ipMpmY1W642LImnEJmGkkddlbjbjxJTZWR5hc/d9cPWb+AR77LxFFrMik3c+44v1kQlIPFP6EjIbOvt/Lv7fHWD9JI/YzN4y1gK7C/VQdNGuikQyNg+5W3rg9ecYf9I5uLAQwY/hxeI3lbNsErebqKe2EbJ8AwcNIC0lDBz53Sq0ML89QapEuy3fB+upuctxLULVDCbNwIDAQAB"
 
 function Encrypt-Password([string] $plain) {
@@ -67,6 +67,7 @@ Write-Host "  Мережа:    напруга=$($d.acRInVolt) В, частота
 Write-Host ("  isPresent: {0}" -f $(if ($isPresent) { "МЕРЕЖА Є ✓" } else { "МЕРЕЖІ НЕМАЄ ✗" })) `
            -ForegroundColor $(if ($isPresent) { "Green" } else { "Red" })
 Write-Host "  Батарея:   SOC=$soc %, напруга=$($d.emsVoltage) В, струм=$($d.emsCurrent) А"
+Write-Host "  Споживання: зараз=$($d.totalConsumPower) Вт, сьогодні=$($d.eLoadToday) кВт·год, місяць=$($d.eLoadMonth) кВт·год"
 Write-Host "  Оновлено:  $($d.dataTimeStr)  (reportFreq=$($d.reportFreq)s)"
 
 # --- 3. Тривоги (зникнення мережі) ---
