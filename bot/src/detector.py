@@ -25,13 +25,17 @@ def detect_transition(previous: bool | None, current: bool) -> str | None:
 
 
 def battery_direction(power_watts: float | None) -> BatteryDirection:
-    """Визначає напрям потоку: у FSolar від'ємна потужність означає заряджання."""
+    """FSolar: додатна потужність — заряджання, від'ємна — розряджання.
+
+    This matches the vendor web client (emsPower > 0 -> btCharge), verified
+    against off-grid telemetry with falling SOC on 2026-09-05.
+    """
     if power_watts is None:
         return "unknown"
     if power_watts < -BATTERY_POWER_DEADBAND_WATTS:
-        return "charging"
-    if power_watts > BATTERY_POWER_DEADBAND_WATTS:
         return "discharging"
+    if power_watts > BATTERY_POWER_DEADBAND_WATTS:
+        return "charging"
     return "idle"
 
 

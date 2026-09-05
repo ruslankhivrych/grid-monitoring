@@ -30,8 +30,13 @@ def test_grid_lost_and_restored():
 
 
 def test_battery_direction_uses_fsolar_power_sign():
-    assert battery_direction(-800) == "charging"
-    assert battery_direction(800) == "discharging"
+    assert battery_direction(-800) == "discharging"
+    assert battery_direction(800) == "charging"
+    assert battery_direction(-10.01) == "discharging"
+    assert battery_direction(10.01) == "charging"
+    assert battery_direction(-10) == "idle"
+    assert battery_direction(10) == "idle"
+    assert battery_direction(0) == "idle"
     assert battery_direction(5) == "idle"
     assert battery_direction(None) == "unknown"
 
@@ -100,6 +105,10 @@ def test_parse_battery_total_power_and_calculated_fallback():
     calculated = parse_snapshot({"emsVoltage": "54", "emsCurrent": "-2"})
     assert total.batt_power == -75
     assert calculated.batt_power == -108
+    assert battery_direction(total.batt_power) == "discharging"
+    assert battery_direction(calculated.batt_power) == "discharging"
+    charging = parse_snapshot({"emsVoltage": "54", "emsCurrent": "2"})
+    assert battery_direction(charging.batt_power) == "charging"
 
 
 def test_parse_consumption_statistics():

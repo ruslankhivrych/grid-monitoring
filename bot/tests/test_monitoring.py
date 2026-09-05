@@ -17,11 +17,11 @@ BASE = datetime(2026, 9, 5, 9, 0, tzinfo=timezone.utc)
 KYIV = ZoneInfo("Europe/Kyiv")
 
 
-def sample(minute=0, present=True, soc=100):
+def sample(minute=0, present=True, soc=100, power=-500):
     return parse_snapshot({
         "dataTime": int((BASE + timedelta(minutes=minute)).timestamp() * 1000),
         "acRInVolt": "230" if present else "0", "emsSoc": soc,
-        "totalConsumPower": "500", "emsPowerTotal": "500",
+        "totalConsumPower": "500", "emsPowerTotal": power,
     })
 
 
@@ -110,6 +110,46 @@ def test_duplicate_and_out_of_order_readings_do_not_replay_alerts(storage):
     assert storage.get_last_battery_soc() == 89
     assert len(storage.recent_events()) == 1
     assert len(storage.telemetry_between(0, int(BASE.timestamp()) + 99999)) == 2
+
+
+@pytest.mark.parametrize('start_soc,end_soc,power,expected', [
+    (90, 89, -1043, [('discharging', 90)]),
+    (50, 49, -742, [('discharging', 50)]),
+    (25, 24, -742, [('discharging', 25)]),
+    (90, 91, 1530, [('charging', 90)]),
+    (99, 100, 1530, [('charging', 99)]),
+    (91, 20, -742, [('discharging', 90), ('discharging', 50), ('discharging', 25)]),
+    (89, 100, 1530, [('charging', 90), ('charging', 99)]),
+])
+def test_signed_power_crossings_survive_restart_without_repeating(
+    tmp_path, start_soc, end_soc, power, expected,
+):
+    path = str(tmp_path / 'thresholds.db')
+    db = Storage(path)
+    db.add_subscriber(123)
+    observe(db, sample(0, present=False, soc=start_soc, power=power))
+    assert db.pending_notifications() == []
+    db.close()
+
+    db = Storage(path)
+    observe(db, sample(5, present=False, soc=end_soc, power=power), minute=5)
+    pending = db.pending_notifications()
+    assert [row[2] for row in pending] == [f'{flow}:{level}' for flow, level in expected]
+    db.close()
+
+    db = Storage(path)
+    observe(db, sample(5, present=False, soc=end_soc, power=power), minute=6)
+    observe(db, sample(10, present=False, soc=end_soc, power=power), minute=10)
+    assert db.pending_notifications() == pending
+    db.close()
+
+
+def test_reported_90_percent_crossing_queues_alert(storage):
+    # SOC/time sequence recorded on the VPS during the reported outage.
+    readings = [(0, 91), (5, 90), (10, 89), (15, 89), (20, 88), (25, 88), (90, 83), (95, 82)]
+    for minute, soc in readings:
+        observe(storage, sample(minute, present=False, soc=soc, power=-742), minute=minute)
+    assert [row[2] for row in storage.pending_notifications()] == ['discharging:90']
 
 
 def test_outage_survives_restart_and_records_soc(tmp_path):

@@ -133,7 +133,7 @@ def _fmt_battery(s: Snapshot) -> str:
     if direction == "charging":
         flow = f"⚡ Заряджання: {_fmt_power(abs(s.batt_power))}"
     elif direction == "discharging":
-        flow = f"🔻 Розряджання: {_fmt_power(s.batt_power)}"
+        flow = f"🔻 Розряджання: {_fmt_power(abs(s.batt_power))}"
     elif direction == "idle":
         flow = "⏸ Акумулятор не заряджається і не розряджається"
     else:

@@ -50,7 +50,7 @@ class Snapshot:
     batt_voltage: float | None
     batt_current: float | None
     timestamp: datetime | None
-    batt_power: float | None = None      # emsPower, Вт
+    batt_power: float | None = None      # emsPowerTotal/emsPower, Вт: + заряд, - розряд
     load_percent: int | None = None      # loadPercent, %
     capacity: int | None = None          # totalEmsCapacity
     load_power: float | None = None      # totalConsumPower, Вт

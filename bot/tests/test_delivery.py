@@ -122,15 +122,29 @@ def test_consumption_statistics_format():
 
 
 def test_battery_format_shows_charging_power():
-    snapshot = parse_snapshot({"emsSoc": "80", "emsPowerTotal": "-1530"})
+    # A battery can charge from PV even while the grid is absent.
+    snapshot = parse_snapshot({"acRInVolt": "0", "emsSoc": "80", "emsPowerTotal": "1530"})
 
     message = bot_module._fmt_battery(snapshot)
 
     assert "Заряджання: 1.53 кВт" in message
 
 
+def test_battery_format_matches_reported_off_grid_discharge():
+    # Regression: the user's 17:25 reading was incorrectly labelled charging.
+    snapshot = parse_snapshot({
+        "acRInVolt": "0", "workModeStr": "Off-Grid Mode", "emsSoc": "83",
+        "emsVoltage": "53", "emsCurrent": "-14", "emsPowerTotal": "-742",
+        "dataTimeStr": "2026-09-05 17:25:00", "timeZone": "UTC+03:00",
+    })
+    message = bot_module._fmt_battery(snapshot)
+    assert "Розряджання: 742 Вт" in message
+    assert "Заряджання:" not in message
+    assert "Розряджання: -" not in message
+
+
 def test_battery_threshold_messages_include_soc_and_power():
-    snapshot = parse_snapshot({"emsSoc": "49", "emsPowerTotal": "850"})
+    snapshot = parse_snapshot({"emsSoc": "49", "emsPowerTotal": "-850"})
 
     message = bot_module._fmt_battery_threshold("discharging", 50, snapshot)
 
@@ -146,7 +160,7 @@ def test_poll_queues_battery_threshold_once(tmp_path, monkeypatch):
         "acRInVolt": "0",
         "workModeStr": "Battery Mode",
         "emsSoc": "89",
-        "emsPowerTotal": "850",
+        "emsPowerTotal": "-850",
         "dataTime": int(datetime.now(timezone.utc).timestamp() * 1000),
     })
     monkeypatch.setattr(bot_module, "client", FakeFSolarClient(snapshot))
@@ -159,6 +173,11 @@ def test_poll_queues_battery_threshold_once(tmp_path, monkeypatch):
     assert len(first_pending) == 1
     assert "нижче 90%: зараз 89%" in first_pending[0][2]
     assert storage.pending_notifications() == first_pending
+    telegram_bot = FakeTelegramBot()
+    asyncio.run(bot_module.delivery_job(_context(storage, telegram_bot)))
+    assert len(telegram_bot.sent) == 1
+    assert "нижче 90%: зараз 89%" in telegram_bot.sent[0][1]
+    assert storage.pending_notifications() == []
     storage.close()
 
 
@@ -171,7 +190,7 @@ def test_telemetry_time_is_consistent_in_messages_and_saved_history(tmp_path, mo
     snapshot = parse_snapshot({
         "acRInVolt": "0",
         "emsSoc": "49",
-        "emsPowerTotal": "850",
+        "emsPowerTotal": "-850",
         "dataTime": int(datetime(2026, 9, 4, 10, 30, tzinfo=timezone.utc).timestamp() * 1000),
         "dataTimeStr": "2026-09-04 18:30:00",
         "timeZone": "UTC+03:00",
@@ -195,7 +214,7 @@ def test_missing_telemetry_time_is_not_replaced_with_current_time(tmp_path, monk
     storage.add_subscriber(123)
     storage.set_last_present(True)
     storage.record_battery_state(91, [])
-    snapshot = parse_snapshot({"acRInVolt": "0", "emsSoc": "20", "emsPowerTotal": "850"})
+    snapshot = parse_snapshot({"acRInVolt": "0", "emsSoc": "20", "emsPowerTotal": "-850"})
     monkeypatch.setattr(bot_module, "client", FakeFSolarClient(snapshot))
 
     assert "Оновлено: невідомо" in bot_module._fmt_status(snapshot)
