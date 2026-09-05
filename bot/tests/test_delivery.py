@@ -1,11 +1,14 @@
 import asyncio
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock
+
+import pytest
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:TEST")
 os.environ.setdefault("FSOLAR_USERNAME", "test")
@@ -19,6 +22,11 @@ import bot as bot_module  # noqa: E402
 from fsolar import parse_snapshot  # noqa: E402
 from storage import Storage  # noqa: E402
 from telegram.error import Forbidden  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def default_allowed_chats(monkeypatch):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset({123})))
 
 
 class FakeTelegramBot:
@@ -304,6 +312,137 @@ def test_outage_command_uses_kyiv_calendar_boundaries(tmp_path, monkeypatch):
     message = bot_module._fmt_outages(storage)
     assert "Сьогодні: 1 · ≈ 15 хв" in message
     assert "Цього місяця: 1 · ≈ 25 хв" in message
+    storage.close()
+
+
+def _update(chat_id, text=''):
+    return SimpleNamespace(
+        effective_chat=SimpleNamespace(id=chat_id) if chat_id is not None else None,
+        message=SimpleNamespace(text=text, reply_text=AsyncMock(), reply_photo=AsyncMock()),
+    )
+
+
+@pytest.mark.parametrize('chat_id,expected', [(123, True), (456, True), (-100123, True), (789, False), (None, False)])
+def test_access_uses_all_configured_chat_ids(monkeypatch, chat_id, expected):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset({123, 456, -100123})))
+    assert bot_module._allowed(_update(chat_id)) is expected
+
+
+@pytest.mark.parametrize('handler', ['cmd_menu', 'cmd_status', 'cmd_battery', 'cmd_stats', 'cmd_history', 'cmd_outages', 'cmd_charts', 'on_text'])
+@pytest.mark.parametrize('allowed_ids,chat_id,expected', [({123, 456}, 456, True), ({123, 456}, 789, False), (set(), 123, False)])
+def test_commands_and_menu_respect_allowlist(monkeypatch, handler, allowed_ids, chat_id, expected):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset(allowed_ids)))
+    monkeypatch.setattr(bot_module, 'client', FakeFSolarClient(parse_snapshot({'emsSoc': '80'})))
+    storage = Storage(':memory:')
+    update = _update(chat_id, bot_module.BTN_HISTORY)
+    context = _context(storage, FakeTelegramBot())
+    context.args = []
+    asyncio.run(getattr(bot_module, handler)(update, context))
+    assert update.message.reply_text.await_count == int(expected)
+    storage.close()
+
+
+@pytest.mark.parametrize('chat_id,expected', [(456, True), (789, False)])
+def test_chart_callbacks_respect_allowlist(monkeypatch, chat_id, expected):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset({123, 456})))
+    render = AsyncMock()
+    monkeypatch.setattr(bot_module, '_send_charts', render)
+    storage = Storage(':memory:')
+    update = _update(chat_id)
+    update.callback_query = SimpleNamespace(answer=AsyncMock(), message=update.message, data='charts:week')
+    asyncio.run(bot_module.on_chart_period(update, _context(storage, FakeTelegramBot())))
+    assert render.await_count == int(expected)
+    update.callback_query.answer.assert_awaited_once()
+    storage.close()
+
+
+def test_subscriptions_are_independent_and_delivery_survives_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset({123, 456})))
+    path = str(tmp_path / 'multi.db')
+    storage = Storage(path)
+    context = _context(storage, FakeTelegramBot())
+    for chat_id in (123, 456, 456):
+        asyncio.run(bot_module.cmd_start(_update(chat_id), context))
+    assert set(storage.subscribers()) == {123, 456}
+    storage.queue_messages(['connection lost'])
+    storage.record_battery_state(89, ['battery below 90'])
+    storage.record_transition(False, 'gridLost', 89, datetime.now(timezone.utc), 'grid lost')
+    storage.close()
+
+    storage = Storage(path)
+    telegram = FakeTelegramBot()
+    context = _context(storage, telegram)
+    asyncio.run(bot_module.delivery_job(context))
+    assert sorted(telegram.sent) == sorted((chat_id, message) for chat_id in (123, 456) for message in ('connection lost', 'battery below 90', 'grid lost'))
+    assert storage.pending_notifications() == []
+    storage.queue_messages(['next event'])
+    asyncio.run(bot_module.cmd_stop(_update(456), context))
+    asyncio.run(bot_module.delivery_job(context))
+    assert storage.subscribers() == [123]
+    assert telegram.sent[-1] == (123, 'next event')
+    assert (456, 'next event') not in telegram.sent
+    storage.close()
+
+
+@pytest.mark.parametrize('allowed_ids', [set(), {123}])
+def test_start_does_not_subscribe_unauthorized_chat(monkeypatch, allowed_ids):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset(allowed_ids)))
+    storage = Storage(':memory:')
+    update = _update(789)
+    asyncio.run(bot_module.cmd_start(update, _context(storage, FakeTelegramBot())))
+    assert storage.subscribers() == []
+    assert '789' in update.message.reply_text.call_args.args[0]
+    storage.close()
+
+
+@pytest.mark.parametrize('allowed_ids,expected', [({123}, [(123, 'queued')]), (set(), [])])
+def test_revoked_chat_loses_subscription_and_queued_messages(monkeypatch, allowed_ids, expected):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset(allowed_ids)))
+    storage = Storage(':memory:')
+    for chat_id in (123, 456):
+        storage.add_subscriber(chat_id)
+    storage.queue_messages(['queued'])
+    telegram = FakeTelegramBot()
+    asyncio.run(bot_module.delivery_job(_context(storage, telegram)))
+    assert telegram.sent == expected
+    assert set(storage.subscribers()) == allowed_ids
+    assert storage.pending_notifications() == []
+    storage.close()
+
+
+def test_one_chat_failure_does_not_block_other_chats(monkeypatch):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset({123, 456})))
+    storage = Storage(':memory:')
+    for chat_id in (123, 456):
+        storage.add_subscriber(chat_id)
+    storage.queue_messages(['event'])
+    telegram = FakeTelegramBot(failures=1)
+    context = _context(storage, telegram)
+    asyncio.run(bot_module.delivery_job(context))
+    assert len(telegram.sent) == 1
+    pending = storage.pending_notifications()
+    assert len(pending) == 1 and pending[0][3] == 1
+    asyncio.run(bot_module.delivery_job(context))
+    assert sorted(telegram.sent) == [(123, 'event'), (456, 'event')]
+    storage.close()
+
+
+def test_blocked_chat_receives_no_more_attempts_from_cached_batch(monkeypatch):
+    monkeypatch.setattr(bot_module, 'cfg', replace(bot_module.cfg, allowed_chat_ids=frozenset({123, 456})))
+    storage = Storage(':memory:')
+    for chat_id in (123, 456):
+        storage.add_subscriber(chat_id)
+    storage.queue_messages(['first', 'second'])
+    attempted = []
+    async def send(chat_id, message):
+        attempted.append((chat_id, message))
+        if chat_id == 123:
+            raise Forbidden('blocked')
+    asyncio.run(bot_module.delivery_job(_context(storage, SimpleNamespace(send_message=send))))
+    assert [item for item in attempted if item[0] == 123] == [(123, 'first')]
+    assert [item for item in attempted if item[0] == 456] == [(456, 'first'), (456, 'second')]
+    assert storage.subscribers() == [456]
+    assert storage.pending_notifications() == []
     storage.close()
 
 

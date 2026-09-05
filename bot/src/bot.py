@@ -1,4 +1,4 @@
-"""Telegram-бот моніторингу електромережі через FSolar (однокористувацький режим)."""
+"""Telegram-бот моніторингу електромережі через FSolar для дозволених чатів."""
 from __future__ import annotations
 
 import asyncio
@@ -69,9 +69,7 @@ def _freshness_warning(s: Snapshot) -> str:
 # --- доступ / стан ---
 
 def _allowed(update: Update) -> bool:
-    if cfg.allowed_chat_id is None:
-        return False
-    return update.effective_chat is not None and update.effective_chat.id == cfg.allowed_chat_id
+    return update.effective_chat is not None and update.effective_chat.id in cfg.allowed_chat_ids
 
 
 def _storage(context: ContextTypes.DEFAULT_TYPE):
@@ -339,7 +337,7 @@ async def _send_stats(send) -> None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if cfg.allowed_chat_id is None:
+    if not cfg.allowed_chat_ids:
         await update.message.reply_text(
             "🔒 Доступ ще не налаштовано. "
             f"Додайте ALLOWED_CHAT_ID={chat_id} до .env і перезапустіть бота."
@@ -467,7 +465,16 @@ async def health_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def delivery_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Доставляє персистентну чергу; невдалі повідомлення лишаються для повтору."""
     storage = context.application.bot_data["storage"]
+    # Revocation also removes persisted subscriptions after a config change.
+    for chat_id in storage.subscribers():
+        if chat_id not in cfg.allowed_chat_ids:
+            storage.remove_subscriber(chat_id)
     for notification_id, chat_id, message, attempts in storage.pending_notifications():
+        # Recheck each send: /stop or Forbidden may have removed the subscription
+        # while a previous message in this batch was being sent.
+        if chat_id not in cfg.allowed_chat_ids or chat_id not in storage.subscribers():
+            storage.remove_subscriber(chat_id)
+            continue
         try:
             await context.bot.send_message(chat_id, message)
         except Forbidden as exc:
