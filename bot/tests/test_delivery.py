@@ -4,6 +4,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:TEST")
 os.environ.setdefault("FSOLAR_USERNAME", "test")
@@ -145,6 +146,7 @@ def test_poll_queues_battery_threshold_once(tmp_path, monkeypatch):
         "workModeStr": "Battery Mode",
         "emsSoc": "89",
         "emsPowerTotal": "850",
+        "dataTime": int(datetime.now(timezone.utc).timestamp() * 1000),
     })
     monkeypatch.setattr(bot_module, "client", FakeFSolarClient(snapshot))
     context = SimpleNamespace(application=SimpleNamespace(bot_data={"storage": storage}))
@@ -156,6 +158,51 @@ def test_poll_queues_battery_threshold_once(tmp_path, monkeypatch):
     assert len(first_pending) == 1
     assert "нижче 90%: зараз 89%" in first_pending[0][2]
     assert storage.pending_notifications() == first_pending
+    storage.close()
+
+
+def test_telemetry_time_is_consistent_in_messages_and_saved_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_module, "TZ", ZoneInfo("Europe/Kyiv"))
+    storage = Storage(str(tmp_path / "bot.db"))
+    storage.add_subscriber(123)
+    storage.set_last_present(True)
+    snapshot = parse_snapshot({
+        "acRInVolt": "0",
+        "emsSoc": "49",
+        "emsPowerTotal": "850",
+        "dataTime": int(datetime(2026, 9, 4, 10, 30, tzinfo=timezone.utc).timestamp() * 1000),
+        "dataTimeStr": "2026-09-04 18:30:00",
+        "timeZone": "UTC+03:00",
+    })
+    monkeypatch.setattr(bot_module, "client", FakeFSolarClient(snapshot))
+
+    for formatter in (bot_module._fmt_status, bot_module._fmt_battery, bot_module._fmt_stats):
+        assert "Оновлено: 18:30:00" in formatter(snapshot)
+    assert "Оновлено: 18:30" in bot_module._fmt_battery_threshold("discharging", 50, snapshot)
+
+    asyncio.run(bot_module.poll_job(_context(storage, FakeTelegramBot())))
+
+    assert storage.recent_events() == [("gridLost", "2026-09-04T15:30:00+00:00", 49)]
+    assert "о 18:30" in storage.pending_notifications()[0][2]
+    assert "2026-09-04 18:30" in bot_module._fmt_history(storage.recent_events())
+    storage.close()
+
+
+def test_missing_telemetry_time_is_not_replaced_with_current_time(tmp_path, monkeypatch):
+    storage = Storage(str(tmp_path / "bot.db"))
+    storage.add_subscriber(123)
+    storage.set_last_present(True)
+    storage.record_battery_state(91, [])
+    snapshot = parse_snapshot({"acRInVolt": "0", "emsSoc": "20", "emsPowerTotal": "850"})
+    monkeypatch.setattr(bot_module, "client", FakeFSolarClient(snapshot))
+
+    assert "Оновлено: невідомо" in bot_module._fmt_status(snapshot)
+    asyncio.run(bot_module.poll_job(_context(storage, FakeTelegramBot())))
+
+    assert storage.get_last_present() is True
+    assert storage.get_last_battery_soc() == 91
+    assert storage.recent_events() == []
+    assert storage.pending_notifications() == []
     storage.close()
 
 

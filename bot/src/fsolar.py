@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import base64
+import math
+import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -46,7 +49,7 @@ class Snapshot:
     soc: int | None
     batt_voltage: float | None
     batt_current: float | None
-    timestamp: datetime
+    timestamp: datetime | None
     batt_power: float | None = None      # emsPower, Вт
     load_percent: int | None = None      # loadPercent, %
     capacity: int | None = None          # totalEmsCapacity
@@ -71,7 +74,60 @@ def _first_present(*values):
     return next((value for value in values if value is not None and value != ""), None)
 
 
-def parse_snapshot(data: dict) -> Snapshot:
+def _source_timezone(value) -> tzinfo | None:
+    """FSolar timeZone is usually UTC+03:00; also accept IANA zone names."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value in {"UTC", "GMT", "Z"}:
+        return timezone.utc
+    match = re.fullmatch(r"(?:UTC|GMT)?([+-])(\d{1,2}):?(\d{2})", value)
+    if match:
+        sign, hours, minutes = match.groups()
+        if int(hours) > 23 or int(minutes) > 59:
+            return None
+        offset = timedelta(hours=int(hours), minutes=int(minutes))
+        return timezone(offset if sign == "+" else -offset)
+    try:
+        return ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _snapshot_timestamp(data: dict, device_timezone: tzinfo) -> datetime | None:
+    # The FSolar web UI displays dataTimeStr together with timeZone, without
+    # converting dataTime. Prefer those same source fields and store UTC once.
+    raw_text = data.get("dataTimeStr")
+    if isinstance(raw_text, str) and re.match(
+        r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}", raw_text.strip()
+    ):
+        try:
+            local_time = datetime.fromisoformat(raw_text.strip())
+        except ValueError:
+            pass
+        else:
+            if local_time.tzinfo is None:
+                source_timezone = _source_timezone(data.get("timeZone"))
+                if data.get("timeZone") and source_timezone is None:
+                    # Do not silently misinterpret an explicit but unknown zone.
+                    return None
+                local_time = local_time.replace(tzinfo=source_timezone or device_timezone)
+            try:
+                return local_time.astimezone(timezone.utc)
+            except (ValueError, OverflowError):
+                return None
+
+    # Compatibility with responses containing only a millisecond timestamp.
+    milliseconds = _to_float(data.get("dataTime"))
+    if milliseconds is None or not math.isfinite(milliseconds) or milliseconds <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def parse_snapshot(data: dict, *, device_timezone: tzinfo = timezone.utc) -> Snapshot:
     """Мапінг відповіді get_device_snapshot у стан мережі/батареї (тестоване)."""
     voltage = _to_float(data.get("acRInVolt"))
     frequency = _to_float(data.get("acRInFreq"))
@@ -84,13 +140,7 @@ def parse_snapshot(data: dict) -> Snapshot:
     soc_f = _to_float(soc_raw)
     soc = int(soc_f) if soc_f is not None else None
 
-    dt_ms = data.get("dataTime")
-    # FSolar dataTime — справжній UTC epoch. Зберігаємо як tz-aware UTC, конвертацію
-    # в локальний пояс робить бот (config.TIMEZONE) — незалежно від поясу хоста/контейнера.
-    timestamp = (
-        datetime.fromtimestamp(dt_ms / 1000, tz=timezone.utc) if dt_ms
-        else datetime.now(timezone.utc)
-    )
+    timestamp = _snapshot_timestamp(data, device_timezone)
 
     load_f = _to_float(data.get("loadPercent"))
     cap_f = _to_float(data.get("totalEmsCapacity"))
@@ -142,11 +192,20 @@ def encrypt_password(plain: str, spki_b64: str = PUBLIC_KEY_SPKI) -> str:
 
 
 class FSolarClient:
-    def __init__(self, username: str, password: str, device_sn: str, device_type: str = "OG"):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        device_sn: str,
+        device_type: str = "OG",
+        *,
+        device_timezone: tzinfo = timezone.utc,
+    ):
         self.username = username
         self.password = password
         self.device_sn = device_sn
         self.device_type = device_type
+        self.device_timezone = device_timezone
         self._token: str | None = None
         self._client = httpx.AsyncClient(base_url=BASE_URL, timeout=20)
 
@@ -169,10 +228,10 @@ class FSolarClient:
         body = {
             "deviceSn": self.device_sn,
             "deviceType": self.device_type,
-            "dateStr": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "dateStr": datetime.now(self.device_timezone).strftime("%Y-%m-%d %H:%M:%S"),
         }
         data = await self._post("/device/get_device_snapshot", body)
-        return parse_snapshot(data or {})
+        return parse_snapshot(data or {}, device_timezone=self.device_timezone)
 
     async def get_alarms(self, days: int = 7) -> list[dict]:
         now_ms = int(time.time() * 1000)

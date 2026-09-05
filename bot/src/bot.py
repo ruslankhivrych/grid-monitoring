@@ -27,7 +27,6 @@ logging.basicConfig(
 log = logging.getLogger("gridbot")
 
 cfg: Config = load_config()
-client = FSolarClient(cfg.fsolar_username, cfg.fsolar_password, cfg.device_sn, cfg.device_type)
 
 try:
     TZ = ZoneInfo(cfg.timezone)
@@ -35,9 +34,17 @@ except Exception:  # noqa: BLE001 — невідома назва поясу →
     log.warning("Невідомий TIMEZONE=%s, використовую UTC", cfg.timezone)
     TZ = ZoneInfo("UTC")
 
+client = FSolarClient(
+    cfg.fsolar_username,
+    cfg.fsolar_password,
+    cfg.device_sn,
+    cfg.device_type,
+    device_timezone=TZ,
+)
 
-def _local_time(dt: datetime) -> str:
-    return dt.astimezone(TZ).strftime("%H:%M:%S")
+
+def _local_time(dt: datetime | None, fmt: str = "%H:%M:%S") -> str:
+    return dt.astimezone(TZ).strftime(fmt) if dt is not None else "невідомо"
 
 
 # --- доступ / стан ---
@@ -143,7 +150,7 @@ def _fmt_stats(s: Snapshot) -> str:
 
 def _fmt_transition(event_type: str, s: Snapshot) -> str:
     soc = f" · Батарея {s.soc}%" if s.soc is not None else ""
-    when = s.timestamp.astimezone(TZ).strftime("%H:%M")
+    when = _local_time(s.timestamp, "%H:%M")
     if event_type == "gridLost":
         return f"⚡️ Зникла мережа о {when}{soc}"
     return f"✅ Зʼявилась мережа о {when}{soc}"
@@ -152,7 +159,7 @@ def _fmt_transition(event_type: str, s: Snapshot) -> str:
 def _fmt_battery_threshold(direction: str, threshold: int, s: Snapshot) -> str:
     soc = f"{s.soc}%" if s.soc is not None else "—"
     power = _fmt_power(abs(s.batt_power)) if s.batt_power is not None else "—"
-    when = s.timestamp.astimezone(TZ).strftime("%H:%M")
+    when = _local_time(s.timestamp, "%H:%M")
     if direction == "discharging":
         return (
             "🔋 Акумулятор розряджається\n"
@@ -315,6 +322,10 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         snapshot = await client.get_snapshot()
     except Exception as exc:  # noqa: BLE001
         log.warning("poll failed: %s", exc)
+        return
+
+    if snapshot.timestamp is None:
+        log.warning("FSolar snapshot has no valid telemetry time; state update skipped")
         return
 
     previous = storage.get_last_present()
