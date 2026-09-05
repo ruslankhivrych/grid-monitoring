@@ -59,12 +59,17 @@ class Snapshot:
     load_energy_year: float | None = None    # eLoadYear, кВт·год
     load_energy_total: float | None = None   # eLoadTotal, кВт·год
 
+    @property
+    def grid_known(self) -> bool:
+        return self.voltage is not None or bool(self.work_mode)
+
 
 def _to_float(value) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
 

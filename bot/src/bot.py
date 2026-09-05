@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.error import Forbidden
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -18,13 +19,17 @@ from telegram.ext import (
 )
 
 from config import Config, load_config
-from detector import battery_direction, detect_battery_thresholds, detect_transition
+from charts import PERIODS, render_chart
+from detector import battery_direction
 from fsolar import FSolarClient, Snapshot
+from monitoring import format_duration, is_fresh, process_observation
+from storage import Outage, Storage
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
 )
 log = logging.getLogger("gridbot")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # Telegram URLs contain the bot token.
 
 cfg: Config = load_config()
 
@@ -47,6 +52,20 @@ def _local_time(dt: datetime | None, fmt: str = "%H:%M:%S") -> str:
     return dt.astimezone(TZ).strftime(fmt) if dt is not None else "невідомо"
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _freshness_warning(s: Snapshot) -> str:
+    if is_fresh(s.timestamp, _utc_now(), cfg.stale_after_minutes):
+        return ""
+    return (
+        "\n⚠️ Немає актуальної телеметрії. Це останні отримані показники; "
+        "стан зараз невідомий.\n"
+        f"Час даних: {_local_time(s.timestamp, '%d.%m.%Y %H:%M')}"
+    )
+
+
 # --- доступ / стан ---
 
 def _allowed(update: Update) -> bool:
@@ -64,6 +83,8 @@ BTN_STATUS = "🔌 Стан"
 BTN_BATTERY = "🔋 Батарея"
 BTN_STATS = "📊 Споживання"
 BTN_HISTORY = "🕓 Історія"
+BTN_OUTAGES = "⚡ Відключення"
+BTN_CHARTS = "📈 Графіки"
 BTN_SUBSCRIBE = "🔔 Підписатись"
 BTN_UNSUBSCRIBE = "🔕 Відписатись"
 
@@ -71,7 +92,7 @@ BTN_UNSUBSCRIBE = "🔕 Відписатись"
 def _menu_kb(subscribed: bool) -> ReplyKeyboardMarkup:
     toggle = BTN_UNSUBSCRIBE if subscribed else BTN_SUBSCRIBE
     return ReplyKeyboardMarkup(
-        [[BTN_STATUS, BTN_BATTERY], [BTN_STATS, BTN_HISTORY], [toggle]],
+        [[BTN_STATUS, BTN_BATTERY], [BTN_STATS, BTN_HISTORY], [BTN_OUTAGES, BTN_CHARTS], [toggle]],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -88,6 +109,10 @@ def _soc_bar(soc: int | None) -> str:
 
 def _fmt_status(s: Snapshot) -> str:
     grid = "🟢 Мережа Є" if s.is_present else "🔴 Мережі НЕМАЄ"
+    if not s.grid_known:
+        grid = "⚠️ Стан мережі невідомий"
+    elif not is_fresh(s.timestamp, _utc_now(), cfg.stale_after_minutes):
+        grid = "⚠️ Останній відомий стан: мережа " + ("була" if s.is_present else "була відсутня")
     volt = f"{s.voltage:.0f} В" if s.voltage is not None else "—"
     freq = f"{s.frequency:.2f} Гц" if s.frequency is not None else "—"
     soc = f"{s.soc}%" if s.soc is not None else "—"
@@ -95,7 +120,7 @@ def _fmt_status(s: Snapshot) -> str:
         f"{grid}\n"
         f"Напруга: {volt} · Частота: {freq}\n"
         f"🔋 Батарея: {soc}\n"
-        f"Оновлено: {_local_time(s.timestamp)}"
+        f"Оновлено: {_local_time(s.timestamp)}{_freshness_warning(s)}"
     )
 
 
@@ -121,7 +146,7 @@ def _fmt_battery(s: Snapshot) -> str:
         f"Навантаження: {load}",
         f"Оновлено: {_local_time(s.timestamp)}",
     ]
-    return "\n".join(line for line in lines if line)
+    return "\n".join(line for line in lines if line) + _freshness_warning(s)
 
 
 def _fmt_power(value: float | None) -> str:
@@ -144,16 +169,95 @@ def _fmt_stats(s: Snapshot) -> str:
         f"Цього місяця: {_fmt_energy(s.load_energy_month)}\n"
         f"Цього року: {_fmt_energy(s.load_energy_year)}\n"
         f"За весь час: {_fmt_energy(s.load_energy_total)}\n"
-        f"Оновлено: {_local_time(s.timestamp)}"
+        f"Оновлено: {_local_time(s.timestamp)}{_freshness_warning(s)}"
     )
 
 
-def _fmt_transition(event_type: str, s: Snapshot) -> str:
+def _fmt_transition(event_type: str, s: Snapshot, outage: Outage | None = None) -> str:
     soc = f" · Батарея {s.soc}%" if s.soc is not None else ""
     when = _local_time(s.timestamp, "%H:%M")
     if event_type == "gridLost":
         return f"⚡️ Зникла мережа о {when}{soc}"
-    return f"✅ Зʼявилась мережа о {when}{soc}"
+    message = f"✅ Зʼявилась мережа о {when}{soc}"
+    if outage is None or s.timestamp is None:
+        return message + "\nЧас початку відключення невідомий."
+    duration = format_duration(int(s.timestamp.timestamp()) - outage.started_at)
+    if outage.has_gaps:
+        message += f"\nІнтервал між показниками: ≈ {duration}"
+        message += "\nБули прогалини у зв’язку — точна тривалість відключення невідома."
+    elif not outage.start_known:
+        message += f"\nВідключення спостерігалось щонайменше {duration}; початок невідомий."
+    else:
+        message += f"\nВідключення тривало ≈ {duration}."
+    if outage.start_soc is not None and s.soc is not None:
+        message += f"\n🔋 Заряд батареї: {outage.start_soc}% → {s.soc}%."
+    return message
+
+
+def _fmt_outages(storage: Storage) -> str:
+    now = _utc_now()
+    local_now = now.astimezone(TZ)
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = day_start.replace(day=1)
+    lines = ["⚡ Статистика відключень"]
+    for title, start in (("Сьогодні", day_start), ("Цього місяця", month_start)):
+        count, seconds, incomplete = storage.outage_summary(int(start.timestamp()), int(now.timestamp()))
+        duration = format_duration(seconds) if count else "0 хв"
+        lines.append(f"{title}: {count} · ≈ {duration}" + (" *" if incomplete else ""))
+    outage = storage.open_outage()
+    if outage:
+        lines.append(f"\nОстанній відомий стан: мережі немає з {datetime.fromtimestamp(outage.started_at, TZ):%d.%m %H:%M}.")
+        if not outage.start_known:
+            lines.append("Початок відключення не зафіксовано.")
+    if storage.get_value("connection_offline") == "1":
+        lines.append("📡 Немає свіжих даних; поточний стан невідомий.")
+    started = storage.get_value("monitor_started_at")
+    if started:
+        lines.append(f"\nОблік від {datetime.fromtimestamp(int(started), TZ):%d.%m.%Y %H:%M}.")
+    else:
+        lines.append("\nОблік почнеться після першого опитування.")
+    lines.append("Тривалість приблизна, за телеметрією. * Є невідомий початок або прогалини.")
+    return "\n".join(lines)
+
+
+def _chart_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(label, callback_data=f"charts:{period}")
+        for period, (_, label) in PERIODS.items()
+    ]])
+
+
+async def _send_charts(message, storage: Storage, period: str = "day") -> None:
+    if period not in PERIODS:
+        await message.reply_text("Використайте /charts day, /charts week або /charts month.")
+        return
+    end = _utc_now()
+    start = end - timedelta(days=PERIODS[period][0])
+    rows = storage.telemetry_between(int(start.timestamp()), int(end.timestamp()))
+    if not rows:
+        await message.reply_text(
+            "📈 За цей період ще немає записаних показників. Історія накопичується "
+            "під час опитування інвертора; старі дані з FSolar не завантажуються.",
+            reply_markup=_chart_keyboard(),
+        )
+        return
+    try:
+        chart = await asyncio.to_thread(
+            render_chart, rows, start, end, TZ, period,
+            gap_seconds=cfg.stale_after_minutes * 60,
+        )
+        try:
+            await message.reply_photo(
+                photo=chart,
+                caption=f"📈 {PERIODS[period][1]} · записів: {len(rows)}. "
+                "Графік містить лише накопичені показники.",
+                reply_markup=_chart_keyboard(),
+            )
+        finally:
+            chart.close()
+    except Exception as exc:
+        log.warning("chart failed: %s", type(exc).__name__)
+        await message.reply_text("⚠️ Не вдалося побудувати або надіслати графік. Спробуйте ще раз.")
 
 
 def _fmt_battery_threshold(direction: str, threshold: int, s: Snapshot) -> str:
@@ -247,7 +351,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage = _storage(context)
     storage.add_subscriber(chat_id)
     await update.message.reply_text(
-        "✅ Підписано на сповіщення про зникнення/появу мережі.",
+        "✅ Підписано на сповіщення про мережу, батарею та втрату/відновлення зв’язку.",
         reply_markup=_menu_kb(subscribed=True),
     )
 
@@ -279,6 +383,24 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(_fmt_history(_storage(context).recent_events()))
 
 
+async def cmd_outages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _allowed(update):
+        await update.message.reply_text(_fmt_outages(_storage(context)))
+
+
+async def cmd_charts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _allowed(update):
+        period = context.args[0].lower() if context.args else "day"
+        await _send_charts(update.message, _storage(context), period)
+
+
+async def on_chart_period(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if _allowed(update) and query.message:
+        await _send_charts(query.message, _storage(context), query.data.split(":", 1)[1])
+
+
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _allowed(update):
         return
@@ -306,6 +428,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_stats(update.message.reply_text)
     elif text == BTN_HISTORY:
         await update.message.reply_text(_fmt_history(storage.recent_events()))
+    elif text == BTN_OUTAGES:
+        await update.message.reply_text(_fmt_outages(storage))
+    elif text == BTN_CHARTS:
+        await _send_charts(update.message, storage)
     elif text == BTN_SUBSCRIBE:
         storage.add_subscriber(chat_id)
         await update.message.reply_text("🔔 Підписано.", reply_markup=_menu_kb(True))
@@ -321,39 +447,21 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         snapshot = await client.get_snapshot()
     except Exception as exc:  # noqa: BLE001
-        log.warning("poll failed: %s", exc)
-        return
+        log.warning("poll failed: %s", type(exc).__name__)
+        snapshot = None
+    _process_observation(storage, snapshot)
 
-    if snapshot.timestamp is None:
-        log.warning("FSolar snapshot has no valid telemetry time; state update skipped")
-        return
 
-    previous = storage.get_last_present()
-    transition = detect_transition(previous, snapshot.is_present)
-
-    if snapshot.soc is not None:
-        previous_soc = storage.get_last_battery_soc()
-        direction = battery_direction(snapshot.batt_power)
-        battery_alerts = detect_battery_thresholds(previous_soc, snapshot.soc, direction)
-        battery_messages = [
-            _fmt_battery_threshold(alert_direction, threshold, snapshot)
-            for alert_direction, threshold in battery_alerts
-        ]
-        if previous_soc is None or direction in {"charging", "discharging"}:
-            storage.record_battery_state(snapshot.soc, battery_messages)
-
-    if transition is None:
-        storage.set_last_present(snapshot.is_present)
-        return
-
-    message = _fmt_transition(transition, snapshot)
-    storage.record_transition(
-        snapshot.is_present,
-        transition,
-        snapshot.soc,
-        snapshot.timestamp,
-        message,
+def _process_observation(storage: Storage, snapshot: Snapshot | None) -> None:
+    process_observation(
+        storage, snapshot, _utc_now(), stale_minutes=cfg.stale_after_minutes,
+        retention_days=cfg.telemetry_retention_days, zone=TZ,
+        transition_message=_fmt_transition, battery_message=_fmt_battery_threshold,
     )
+
+
+async def health_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    _process_observation(_storage(context), None)
 
 
 async def delivery_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -380,8 +488,6 @@ async def _on_shutdown(app: Application) -> None:
 
 
 def main() -> None:
-    from storage import Storage
-
     # Python 3.12+/3.14: run_polling() викликає asyncio.get_event_loop(), який більше не
     # створює цикл автоматично і кидає RuntimeError — створюємо його явно.
     try:
@@ -398,7 +504,10 @@ def main() -> None:
     app.add_handler(CommandHandler("battery", cmd_battery))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("outages", cmd_outages))
+    app.add_handler(CommandHandler("charts", cmd_charts))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CallbackQueryHandler(on_chart_period, pattern=r"^charts:(day|week|month)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.job_queue.run_repeating(
@@ -406,6 +515,9 @@ def main() -> None:
         interval=timedelta(minutes=cfg.poll_interval_minutes),
         first=timedelta(seconds=15),
         name="fsolar-poll",
+    )
+    app.job_queue.run_repeating(
+        health_job, interval=60, first=60, name="telemetry-health",
     )
     app.job_queue.run_repeating(
         delivery_job,

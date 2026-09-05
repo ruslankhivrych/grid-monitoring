@@ -14,9 +14,20 @@ class Config:
     poll_interval_minutes: int
     db_path: str
     timezone: str
+    stale_after_minutes: int = 15
+    telemetry_retention_days: int = 90
 
 
 def load_config() -> Config:
+    def positive_int(key: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(key, str(default)))
+        except ValueError as exc:
+            raise SystemExit(f"{key} має бути цілим числом") from exc
+        if value <= 0:
+            raise SystemExit(f"{key} має бути більшим за нуль")
+        return value
+
     def required(key: str) -> str:
         value = os.environ.get(key, "").strip()
         if not value:
@@ -47,4 +58,6 @@ def load_config() -> Config:
         poll_interval_minutes=poll_interval_minutes,
         db_path=os.environ.get("DB_PATH", "bot.db").strip() or "bot.db",
         timezone=os.environ.get("TIMEZONE", "Europe/Kyiv").strip() or "Europe/Kyiv",
+        stale_after_minutes=positive_int("STALE_AFTER_MINUTES", 15),
+        telemetry_retention_days=positive_int("TELEMETRY_RETENTION_DAYS", 90),
     )
