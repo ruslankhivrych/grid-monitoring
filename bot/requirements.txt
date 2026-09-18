@@ -1,5 +1,5 @@
 python-telegram-bot[job-queue]==22.8
 cryptography==50.0.1
 httpx==0.28.1
-tzdata==2026.3
+tzdata==2026.4
 matplotlib==3.11.1
