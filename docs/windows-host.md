@@ -74,7 +74,7 @@ Run management commands from an elevated PowerShell:
 ```powershell
 Get-ScheduledTask -TaskPath '\Monitoring\'
 Get-ScheduledTaskInfo -TaskPath '\Monitoring\' -TaskName grid-monitoring
-Get-Content C:\Monitoring\logs\grid-monitoring\bot.log -Tail 40
+Get-Content C:\Monitoring\logs\grid-monitoring\bot.log -Encoding UTF8 -Tail 40
 Stop-ScheduledTask -TaskPath '\Monitoring\' -TaskName grid-monitoring
 Start-ScheduledTask -TaskPath '\Monitoring\' -TaskName grid-monitoring
 Start-ScheduledTask -TaskPath '\Monitoring\' -TaskName grid-monitoring-backup
