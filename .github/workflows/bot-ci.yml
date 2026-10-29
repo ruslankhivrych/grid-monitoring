@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'bot/**'
+      - 'deploy/windows/**'
       - '.github/workflows/bot-ci.yml'
   pull_request:
   workflow_dispatch:
@@ -17,11 +18,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install -r bot/requirements.txt pytest pip-audit
+        run: pip install -r deploy/windows/requirements.txt pytest pip-audit
       - name: Verify dependency graph
         run: pip check
       - name: Audit dependencies
-        run: pip-audit -r bot/requirements.txt
+        run: pip-audit -r deploy/windows/requirements.txt
       - name: Syntax check
         run: python -m compileall bot/src
       - name: Run tests

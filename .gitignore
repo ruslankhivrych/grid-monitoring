@@ -21,3 +21,4 @@ venv/
 bot/.env
 bot/data/
 *.db
+.deployment/

@@ -60,6 +60,7 @@ docker compose logs -f
 `ALLOWED_CHAT_ID=123456789,987654321`. Кожен чат підписується через `/start`.
 
 Повна інструкція з конфігурації та розгортання: [bot/README.md](bot/README.md).
+Розгортання на Windows без входу користувача: [docs/windows-host.md](docs/windows-host.md).
 
 ## Перевірка
 
