@@ -16,8 +16,8 @@ C:\Monitoring\
 
 `\Monitoring\grid-monitoring` runs under the built-in LOCAL SERVICE account
 (`S-1-5-19`), without a user password and without administrator privileges.
-It starts at boot, retries failures after one minute and has a five-minute
-repeated trigger as a fallback. Running instances are not duplicated. There is
+It starts at boot and has a one-minute repeated trigger to recover even if
+Windows does not apply its configured failure retry. Running instances are not duplicated. There is
 no execution time limit, and switching to battery does not stop the task.
 
 `\Monitoring\grid-monitoring-backup` runs daily at 03:15 in the Windows time
@@ -94,3 +94,6 @@ The included launcher/install script is specific to this Telegram application.
 
 Task Scheduler resumes the bot after Windows boots. Automatic hardware power-on
 after a complete shutdown or battery depletion depends on the laptop firmware.
+On supported HP laptops, `deploy\windows\enable-hp-power-on-ac.ps1` enables the
+specific AC power-on setting and backs up its original value. It requires a
+writable setting with no BIOS setup password or physical-presence requirement.

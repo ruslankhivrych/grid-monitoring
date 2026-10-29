@@ -64,8 +64,8 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatt
 $action = New-ScheduledTaskAction -Execute $python -WorkingDirectory $project `
     -Argument ('-u "{0}" --project "{1}" --data "{2}" --logs "{3}"' -f $launcher, $project, $data, $logs)
 $startup = New-ScheduledTaskTrigger -AtStartup
-$watchdog = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5)) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5)
+$watchdog = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
 $null = Register-ScheduledTask -TaskPath '\Monitoring\' -TaskName $Name -Action $action `
     -Trigger @($startup, $watchdog) -Settings $settings -Principal $principal `
     -Description 'FSolar Telegram monitoring; boot startup and automatic recovery without interactive logon.' -Force
