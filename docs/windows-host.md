@@ -53,10 +53,14 @@ copy is needed to recover from loss of the laptop or its disk.
    configuration, sets project permissions, registers both tasks and starts
    the bot. The launcher always uses the separate native data directory,
    regardless of a Docker/Linux `DB_PATH` saved in `.env`.
+   Use `-Disabled` to register both tasks without activating them while
+   credentials or the migration are being verified.
 7. Disable idle sleep and hibernation on AC and battery while hosting monitors.
    If supported, set closing the lid to do nothing. Keep the Windows critical
    battery action enabled. Power settings should be backed up before changing
    them. Returning to this deployment does not require restarting the laptop.
+   `deploy\windows\configure-power.ps1` backs up the current plan and applies
+   these settings, including the lid action on portable hardware.
 
 Protected directories grant administrators and SYSTEM full control. LOCAL
 SERVICE can read application code/configuration and modify its data, logs and

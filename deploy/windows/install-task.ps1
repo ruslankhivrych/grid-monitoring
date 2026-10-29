@@ -5,7 +5,8 @@ param(
     [string]$Root = 'C:\Monitoring',
     [ValidatePattern('\A[a-z][a-z0-9-]+\z')]
     [string]$Name = 'grid-monitoring',
-    [switch]$PrepareOnly
+    [switch]$PrepareOnly,
+    [switch]$Disabled
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -59,7 +60,7 @@ catch { $null = $scheduler.GetFolder('\').CreateFolder('Monitoring') }
 $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-19' -LogonType ServiceAccount -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+    -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -Disable:$Disabled
 $action = New-ScheduledTaskAction -Execute $python -WorkingDirectory $project `
     -Argument ('-u "{0}" --project "{1}" --data "{2}" --logs "{3}"' -f $launcher, $project, $data, $logs)
 $startup = New-ScheduledTaskTrigger -AtStartup
@@ -72,9 +73,9 @@ $null = Register-ScheduledTask -TaskPath '\Monitoring\' -TaskName $Name -Action 
 $backupAction = New-ScheduledTaskAction -Execute $python -WorkingDirectory $project `
     -Argument ('"{0}" --database "{1}" --directory "{2}" --keep 14' -f $backupScript, (Join-Path $data 'bot.db'), $backups)
 $backupSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
+    -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew -Disable:$Disabled
 $null = Register-ScheduledTask -TaskPath '\Monitoring\' -TaskName "$Name-backup" `
     -Action $backupAction -Trigger (New-ScheduledTaskTrigger -Daily -At '03:15') `
     -Settings $backupSettings -Principal $principal -Description 'Daily SQLite backups; retain 14 automatic copies.' -Force
-Start-ScheduledTask -TaskPath '\Monitoring\' -TaskName $Name
+if (-not $Disabled) { Start-ScheduledTask -TaskPath '\Monitoring\' -TaskName $Name }
 Write-Output "Registered \Monitoring\$Name and \Monitoring\$Name-backup."
